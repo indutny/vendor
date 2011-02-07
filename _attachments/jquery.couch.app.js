@@ -167,15 +167,21 @@
         $.couch.app.ddoc_handlers[design.doc_id].push(handleDDoc);
       } else {
         $.couch.app.ddoc_handlers[design.doc_id] = [handleDDoc];
-        // use getDbProperty to bypass %2F encoding on _show/app
+        
+        function onSuccess(doc) {
+          $.couch.app.ddocs[design.doc_id] = doc;
+          $.couch.app.ddoc_handlers[design.doc_id].forEach(function(h) {
+            $(function() {h(doc)});
+          });
+          $.couch.app.ddoc_handlers[design.doc_id] = null;
+        };
+        
+        // use getDbProperty to bypass %2F encoding on _show/app        
         db.getDbProperty(design.code_path, {
-          success : function(doc) {
-            $.couch.app.ddocs[design.doc_id] = doc;
-            $.couch.app.ddoc_handlers[design.doc_id].forEach(function(h) {
-              $(function() {h(doc)});
-            });
-            $.couch.app.ddoc_handlers[design.doc_id] = null;
-          },
+          success : opts.compile === true ? function(doc) {
+            // If opts.compile = true, then compile functions into <script> tags
+            $.couch.compile(doc, onSuccess);
+          } : onSuccess,
           error : function() {
             $.couch.app.ddoc_handlers[design.doc_id].forEach(function(h) {
               $(function() {h()});
@@ -188,6 +194,82 @@
   };
   $.couch.app.ddocs = {};
   $.couch.app.ddoc_handlers = {};
+  
+  // Compile doc and place all evently widgets as scripts on a page
+  // to simplify debugging & breakpoints
+  $.couch.compile = function(doc, callback) {
+    if (!doc || !doc.couchapp || !doc.couchapp.manifest) return callback(doc);
+    
+    var scripts = doc.couchapp.manifest.filter(function(path) {
+          return /^evently\/.*\.js$/.test(path);
+        }),
+        groups = {};
+    
+    
+    // Group all functions in evently widget
+    // and place it into groups[widget-name] array   
+    scripts.forEach(function(path) {
+      var fragments = path.split('/'),
+          filename = fragments.pop().replace(/\.js$/, '');
+          
+      // Find a place for function
+      var place = fragments.reduce(function(prev, fragment) {
+        return prev[fragment] = prev[fragment] || {};
+      }, doc);
+      
+      var content = place[filename],
+          id = 'cb' + Math.round(Math.random() * 1e9),
+          contents = groups[fragments[1]] = groups[fragments[1]] || [];     
+      
+      // Add pretty comment, that will identify function
+      contents.push('\r\n\r\n/** ' + doc._id + '/' + path + '**/\r\n\r\n');
+      
+      // Wrap code in try {...} catch(e) { ...}
+      contents.push(['try{', id, '((function(){return ',
+                 content.replace(/(\r\n|\r|\n)/g, '\r\n'),
+                 '})());} catch(e) { $.log(e); }'].join(''));
+      
+      // When this callback will be called - string value in a widget
+      // will be replaced w/ compiled function in <script> tag
+      window[id] = function(fn) {
+        delete window[id];
+        place[filename] = fn;
+      };      
+                 
+    });
+    
+    // For each group - create <script src="data:...."></script>
+    // with code of widget's functions
+    for (var groupKey in groups) {
+      if (!groups.hasOwnProperty(groupKey)) return;
+      
+      var contents = groups[groupKey],      
+          script = document.createElement('script');
+        
+          script.src = ['data:text/javascript;',
+                        doc._id, '/evently/', groupKey,
+                        ';plain,',
+                        escape(contents.join('\r\n'))].join('');
+
+          document.body.appendChild(script);
+    };
+      
+    // Create final script, that will call callback
+    // TODO: Find a better way for that
+    var finalCallback = 'final' + Math.round(Math.random() * 1e9)
+    
+    window[finalCallback] = function() {
+      delete window[finalCallback];
+      callback(doc);
+    };     
+     
+    var script = document.createElement('script'),
+        code = document.createTextNode(finalCallback + '()');
+    
+    script.appendChild(code);
+    document.body.appendChild(script);
+  };
+  
   // legacy support. $.CouchApp is deprecated, please use $.couch.app
   $.CouchApp = $.couch.app;
 })(jQuery);
